@@ -1,0 +1,74 @@
+{
+  "strategy_name": "Crypto Reversal Strategy v1.0 - Aggressive",
+  "timeframe": "15m",
+  "description": "Aggressive configuration for experienced traders seeking higher frequency and larger moves",
+  
+  "indicators": {
+    "rsi": {
+      "enabled": true,
+      "length": 14,
+      "overbought": 75,
+      "oversold": 25
+    },
+    "macd": {
+      "enabled": true,
+      "fast": 12,
+      "slow": 26,
+      "signal": 9
+    },
+    "bollinger_bands": {
+      "enabled": true,
+      "period": 20,
+      "stddev": 2.0,
+      "squeeze_threshold": 0.4
+    },
+    "ema": {
+      "enabled": true,
+      "short": 9,
+      "long": 21,
+      "trend_ema": 50
+    }
+  },
+  
+  "features": {
+    "combo_features": true,
+    "volume_profile": true,
+    "trend_filter": false,
+    "divergence_detection": true,
+    "multi_timeframe_confirmation": false
+  },
+  
+  "entry_conditions": {
+    "require_bb_squeeze": true,
+    "require_macd_crossover": true,
+    "require_rsi_extreme": false,
+    "require_volume_filter": true,
+    "require_trend_alignment": false,
+    "min_conditions_met": 2
+  },
+  
+  "risk_management": {
+    "position_size_percent": 3.0,
+    "stop_loss_percent": 1.2,
+    "take_profit_percent": 2.0,
+    "risk_reward_ratio": 1.2,
+    "trailing_stop_enabled": true,
+    "trailing_atr_multiplier": 1.0
+  },
+  
+  "trading_rules": {
+    "max_daily_trades": 30,
+    "max_concurrent_positions": 1,
+    "min_trade_interval_minutes": 10,
+    "daily_loss_limit_percent": 8.0,
+    "avoid_news_events": false
+  },
+  
+  "backtest_settings": {
+    "initial_capital": 10000,
+    "commission_percent": 0.1,
+    "slippage_percent": 0.1,
+    "starting_date": "2024-01-01",
+    "ending_date": "2024-12-31"
+  }
+}
