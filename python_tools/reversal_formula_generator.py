@@ -1,441 +1,510 @@
 #!/usr/bin/env python3
 
 """
-Reversal Formula Generator - Discover optimal trading formulas
+Reversal Formula Generator - Reverse Engineer from Real Data
 
-Automatically discovers the best mathematical formula to predict reversals
-from OHLCV data using:
-- Genetic algorithm for formula optimization
-- Statistical correlation analysis
-- Machine learning feature importance
-- Exhaustive combo search
+Method:
+1. User manually marks actual reversal points in data
+2. Extract OHLCV features from those reversal candles
+3. Machine learning finds common pattern in reversals
+4. Generate mathematical formula to predict reversals
 """
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Callable
+from typing import Dict, List, Tuple, Optional
+import json
 import warnings
 warnings.filterwarnings('ignore')
 
 try:
-    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
+    from sklearn.metrics import classification_report, confusion_matrix
+    import sympy as sp
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
 
 
-class ReversalDetector:
-    """Detect reversals in OHLCV data."""
-    
-    @staticmethod
-    def identify_reversals(df: pd.DataFrame, lookforward: int = 5) -> np.ndarray:
-        """
-        Identify if each candle is followed by a reversal.
-        
-        Args:
-            df: DataFrame with Close prices
-            lookforward: How many candles ahead to check (5 = 75 min for 15m)
-        
-        Returns:
-            Binary array: 1 if reversal occurs, 0 otherwise
-        """
-        closes = df['Close'].values
-        reversals = np.zeros(len(closes))
-        
-        for i in range(len(closes) - lookforward):
-            current_close = closes[i]
-            
-            # Check if price reverses direction within lookforward period
-            future_max = np.max(closes[i+1:i+lookforward+1])
-            future_min = np.min(closes[i+1:i+lookforward+1])
-            
-            # Reversal if price moves >0.5% in opposite direction first
-            up_move = (future_max - current_close) / current_close
-            down_move = (current_close - future_min) / current_close
-            
-            if down_move > 0.005 and down_move > up_move:
-                reversals[i] = 1  # Downward reversal
-            elif up_move > 0.005 and up_move > down_move:
-                reversals[i] = -1  # Upward reversal
-        
-        return reversals
-    
-    @staticmethod
-    def identify_local_tops_bottoms(df: pd.DataFrame, window: int = 5) -> Dict:
-        """
-        Identify local tops and bottoms.
-        
-        Args:
-            df: DataFrame with OHLC data
-            window: Number of candles to check on each side
-        
-        Returns:
-            Dictionary with 'tops' and 'bottoms' arrays
-        """
-        closes = df['Close'].values
-        tops = np.zeros(len(closes))
-        bottoms = np.zeros(len(closes))
-        
-        for i in range(window, len(closes) - window):
-            current = closes[i]
-            left_max = np.max(closes[i-window:i])
-            left_min = np.min(closes[i-window:i])
-            right_max = np.max(closes[i+1:i+window+1])
-            right_min = np.min(closes[i+1:i+window+1])
-            
-            if current >= left_max and current > right_max:
-                tops[i] = 1
-            if current <= left_min and current < right_min:
-                bottoms[i] = 1
-        
-        return {'tops': tops, 'bottoms': bottoms}
-
-
-class FormulaBuilder:
-    """Build and optimize reversal formulas."""
+class ReversalDataLabeler:
+    """Tools for marking and managing reversal points."""
     
     def __init__(self, df: pd.DataFrame):
         """
-        Initialize formula builder.
+        Initialize labeler.
         
         Args:
             df: DataFrame with OHLCV data
         """
         self.df = df.copy()
-        self.formulas = {}
-        self.scores = {}
-        self._prepare_data()
+        self.reversals = np.zeros(len(df), dtype=int)  # 0=not reversal, 1=reversal
+        self.reversal_times = []
     
-    def _prepare_data(self):
-        """Prepare all basic indicators."""
-        df = self.df
+    def mark_reversal(self, index: int, reversal_type: str = 'bullish'):
+        """
+        Mark a candle as reversal point.
         
-        # Price-based
-        df['body_ratio'] = (df['Close'] - df['Open']) / (df['High'] - df['Low'] + 0.001)
-        df['upper_wick'] = (df['High'] - np.maximum(df['Open'], df['Close'])) / (df['High'] - df['Low'] + 0.001)
-        df['lower_wick'] = (np.minimum(df['Open'], df['Close']) - df['Low']) / (df['High'] - df['Low'] + 0.001)
-        df['close_position'] = (df['Close'] - df['Low']) / (df['High'] - df['Low'] + 0.001)
+        Args:
+            index: Candle index
+            reversal_type: 'bullish' or 'bearish'
+        """
+        if 0 <= index < len(self.df):
+            self.reversals[index] = 1
+            self.reversal_times.append({
+                'index': index,
+                'type': reversal_type,
+                'open': self.df.iloc[index]['Open'],
+                'close': self.df.iloc[index]['Close'],
+                'time': self.df.iloc[index].name if hasattr(self.df.iloc[index].name, '__str__') else str(index)
+            })
+    
+    def mark_reversals_from_list(self, indices: List[int]):
+        """
+        Mark multiple reversals at once.
         
-        # Volume-based
-        df['vol_ma20'] = df['Volume'].rolling(20).mean()
-        df['vol_ratio'] = df['Volume'] / (df['vol_ma20'] + 1)
+        Args:
+            indices: List of candle indices that are reversals
+        """
+        for idx in indices:
+            self.mark_reversal(idx)
+    
+    def load_reversals_from_json(self, json_file: str):
+        """
+        Load previously saved reversal marks.
+        
+        Args:
+            json_file: Path to JSON file with reversal indices
+        """
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+            indices = data.get('reversal_indices', [])
+            self.mark_reversals_from_list(indices)
+    
+    def save_reversals_to_json(self, json_file: str):
+        """
+        Save marked reversals to JSON.
+        
+        Args:
+            json_file: Path to save JSON
+        """
+        reversals = {
+            'reversal_indices': np.where(self.reversals == 1)[0].tolist(),
+            'reversal_count': int(np.sum(self.reversals)),
+            'reversal_details': self.reversal_times
+        }
+        with open(json_file, 'w') as f:
+            json.dump(reversals, f, indent=2, default=str)
+    
+    def get_reversal_candles(self) -> pd.DataFrame:
+        """
+        Get all candles marked as reversals.
+        
+        Returns:
+            DataFrame of reversal candles
+        """
+        return self.df[self.reversals == 1]
+    
+    def get_non_reversal_candles(self) -> pd.DataFrame:
+        """
+        Get all non-reversal candles.
+        
+        Returns:
+            DataFrame of non-reversal candles
+        """
+        return self.df[self.reversals == 0]
+
+
+class ReversalFeatureExtractor:
+    """Extract features from OHLCV candles."""
+    
+    @staticmethod
+    def extract_features(candle_row: pd.Series) -> Dict[str, float]:
+        """
+        Extract all relevant features from single candle.
+        
+        Args:
+            candle_row: Single row from OHLCV DataFrame
+        
+        Returns:
+            Dictionary of features
+        """
+        o = candle_row['Open']
+        h = candle_row['High']
+        l = candle_row['Low']
+        c = candle_row['Close']
+        v = candle_row['Volume']
+        
+        features = {}
+        
+        # Body ratio
+        range_hl = h - l
+        if range_hl > 0:
+            features['body_ratio'] = (c - o) / range_hl  # -1 to 1
+            features['upper_wick_ratio'] = (h - max(o, c)) / range_hl
+            features['lower_wick_ratio'] = (min(o, c) - l) / range_hl
+            features['close_position'] = (c - l) / range_hl  # Where close is in range
+            features['open_position'] = (o - l) / range_hl   # Where open is in range
+        else:
+            features['body_ratio'] = 0
+            features['upper_wick_ratio'] = 0
+            features['lower_wick_ratio'] = 0
+            features['close_position'] = 0.5
+            features['open_position'] = 0.5
+        
+        # Candle size
+        features['body_size'] = abs(c - o) / o if o > 0 else 0
+        features['total_range'] = range_hl / o if o > 0 else 0
+        features['wick_total'] = (features['upper_wick_ratio'] + features['lower_wick_ratio'])
         
         # Momentum
-        df['price_change'] = df['Close'].pct_change()
-        df['price_change_ma5'] = df['price_change'].rolling(5).mean()
+        features['price_change_pct'] = (c - o) / o if o > 0 else 0
         
-        # Moving averages
-        df['ema9'] = df['Close'].ewm(span=9).mean()
-        df['ema21'] = df['Close'].ewm(span=21).mean()
-        df['sma20'] = df['Close'].rolling(20).mean()
+        # Volume
+        features['volume'] = v
+        features['log_volume'] = np.log(v) if v > 0 else 0
         
-        # RSI
-        df['rsi'] = self._calculate_rsi(df['Close'], 14)
+        # Pattern indicators
+        is_bullish = c > o
+        is_bearish = c < o
+        is_doji = abs(c - o) < range_hl * 0.1
+        has_upper_wick = features['upper_wick_ratio'] > 0.2
+        has_lower_wick = features['lower_wick_ratio'] > 0.2
         
-        # MACD
-        ema12 = df['Close'].ewm(span=12).mean()
-        ema26 = df['Close'].ewm(span=26).mean()
-        df['macd'] = ema12 - ema26
-        df['macd_signal'] = df['macd'].ewm(span=9).mean()
-        df['macd_hist'] = df['macd'] - df['macd_signal']
+        features['is_bullish'] = 1 if is_bullish else 0
+        features['is_bearish'] = 1 if is_bearish else 0
+        features['is_doji'] = 1 if is_doji else 0
+        features['has_long_upper_wick'] = 1 if has_upper_wick else 0
+        features['has_long_lower_wick'] = 1 if has_lower_wick else 0
+        features['hammer_pattern'] = 1 if (is_bullish and has_lower_wick and features['upper_wick_ratio'] < 0.1) else 0
+        features['hanging_man_pattern'] = 1 if (is_bearish and has_lower_wick and features['upper_wick_ratio'] < 0.1) else 0
+        features['shooting_star_pattern'] = 1 if (is_bearish and has_upper_wick and features['lower_wick_ratio'] < 0.1) else 0
+        features['inverted_hammer_pattern'] = 1 if (is_bullish and has_upper_wick and features['lower_wick_ratio'] < 0.1) else 0
         
-        # ATR
-        df['atr'] = self._calculate_atr(df, 14)
-        
-        self.df = df
+        return features
     
     @staticmethod
-    def _calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI."""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / (loss + 0.001)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    @staticmethod
-    def _calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate ATR."""
-        tr1 = df['High'] - df['Low']
-        tr2 = abs(df['High'] - df['Close'].shift())
-        tr3 = abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(period).mean()
-        return atr
-    
-    def build_simple_formulas(self) -> Dict[str, Callable]:
+    def extract_batch_features(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Build a collection of simple reversal formulas.
-        
-        Returns:
-            Dictionary of formula name -> formula function
-        """
-        formulas = {}
-        df = self.df
-        
-        # Formula 1: RSI Extreme with Volume
-        formulas['rsi_volume'] = lambda: (
-            ((df['rsi'] < 30) | (df['rsi'] > 70)) & 
-            (df['vol_ratio'] > 1.1)
-        ).astype(float)
-        
-        # Formula 2: Bollinger Band Squeeze
-        bb_mid = df['Close'].rolling(20).mean()
-        bb_std = df['Close'].rolling(20).std()
-        bb_upper = bb_mid + 2 * bb_std
-        bb_lower = bb_mid - 2 * bb_std
-        bb_width = (bb_upper - bb_lower) / bb_mid
-        formulas['bb_squeeze'] = lambda: (bb_width < 0.03).astype(float)
-        
-        # Formula 3: MACD Crossover
-        formulas['macd_cross'] = lambda: (
-            (df['macd'].shift(1) < df['macd_signal'].shift(1)) & 
-            (df['macd'] > df['macd_signal'])
-        ).astype(float)
-        
-        # Formula 4: Wick Reversal Signal
-        formulas['wick_reversal'] = lambda: (
-            ((df['upper_wick'] > 0.3) & (df['body_ratio'] < -0.2)) |
-            ((df['lower_wick'] > 0.3) & (df['body_ratio'] > 0.2))
-        ).astype(float)
-        
-        # Formula 5: Combined Momentum
-        formulas['momentum_combo'] = lambda: (
-            (abs(df['macd_hist']) > df['macd_hist'].rolling(20).std()) &
-            (df['vol_ratio'] > 1.0)
-        ).astype(float)
-        
-        # Formula 6: Price Action Pattern
-        formulas['price_action'] = lambda: (
-            (abs(df['body_ratio']) < 0.1) &  # Doji-like
-            (df['upper_wick'] + df['lower_wick'] > 0.5) &  # Long wicks
-            (df['vol_ratio'] > 1.2)
-        ).astype(float)
-        
-        # Formula 7: EMA Bounce
-        formulas['ema_bounce'] = lambda: (
-            (abs(df['Close'] - df['ema21']) / df['ema21'] < 0.02) &
-            (df['ema9'] > df['ema21'])
-        ).astype(float)
-        
-        # Formula 8: ATR Volatility Expansion
-        formulas['atr_expansion'] = lambda: (
-            (df['atr'] > df['atr'].rolling(20).mean() * 1.3)
-        ).astype(float)
-        
-        self.formulas = formulas
-        return formulas
-    
-    def evaluate_formula(self, signal: np.ndarray, target: np.ndarray) -> Dict:
-        """
-        Evaluate how well a formula predicts reversals.
+        Extract features from all candles.
         
         Args:
-            signal: Formula output (0 or 1)
-            target: Actual reversal labels
+            df: DataFrame with OHLCV data
         
         Returns:
-            Dictionary with performance metrics
+            DataFrame with extracted features
         """
-        # Remove NaN values
-        mask = ~(np.isnan(signal) | np.isnan(target))
-        signal = signal[mask]
-        target = target[mask]
+        features_list = []
+        for idx, row in df.iterrows():
+            features = ReversalFeatureExtractor.extract_features(row)
+            features_list.append(features)
         
-        if len(signal) == 0:
-            return {'accuracy': 0, 'precision': 0, 'recall': 0, 'f1': 0}
+        return pd.DataFrame(features_list)
+
+
+class ReversalFormulaDiscovery:
+    """Discover formula from reversal features using ML."""
+    
+    def __init__(self, reversal_features: pd.DataFrame, non_reversal_features: pd.DataFrame):
+        """
+        Initialize with reversal and non-reversal features.
         
-        true_positives = np.sum((signal == 1) & (target == 1))
-        false_positives = np.sum((signal == 1) & (target == 0))
-        false_negatives = np.sum((signal == 0) & (target == 1))
-        true_negatives = np.sum((signal == 0) & (target == 0))
+        Args:
+            reversal_features: Features from actual reversal candles
+            non_reversal_features: Features from normal candles
+        """
+        self.reversal_features = reversal_features.copy()
+        self.non_reversal_features = non_reversal_features.copy()
         
-        accuracy = (true_positives + true_negatives) / len(signal) if len(signal) > 0 else 0
-        precision = true_positives / (true_positives + false_positives + 0.001)
-        recall = true_positives / (true_positives + false_negatives + 0.001)
-        f1 = 2 * (precision * recall) / (precision + recall + 0.001)
+        # Prepare training data
+        reversal_features['label'] = 1
+        non_reversal_features['label'] = 0
+        
+        self.training_data = pd.concat([reversal_features, non_reversal_features], ignore_index=True)
+        self.feature_names = [col for col in self.training_data.columns if col != 'label']
+        
+        self.model = None
+        self.scaler = StandardScaler()
+        self.feature_importance = None
+    
+    def train_model(self) -> Dict:
+        """
+        Train random forest to find pattern.
+        
+        Returns:
+            Training metrics
+        """
+        X = self.training_data[self.feature_names].fillna(0)
+        y = self.training_data['label']
+        
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=0.3, random_state=42
+        )
+        
+        # Train model
+        self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+        self.model.fit(X_train, y_train)
+        
+        # Get feature importance
+        self.feature_importance = dict(zip(
+            self.feature_names,
+            self.model.feature_importances_
+        ))
+        
+        # Evaluate
+        train_score = self.model.score(X_train, y_train)
+        test_score = self.model.score(X_test, y_test)
         
         return {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'signal_count': np.sum(signal == 1)
+            'train_accuracy': train_score,
+            'test_accuracy': test_score,
+            'feature_importance': self.feature_importance
         }
     
-    def optimize_formulas(self, reversals: np.ndarray) -> List[Tuple]:
+    def get_top_features(self, top_n: int = 5) -> List[Tuple]:
         """
-        Test all formulas and rank by performance.
+        Get most important features.
         
         Args:
-            reversals: Target reversal labels
+            top_n: Number of top features
         
         Returns:
-            List of (formula_name, performance_dict) sorted by F1 score
+            List of (feature_name, importance) sorted by importance
         """
-        results = []
+        if self.feature_importance is None:
+            return []
         
-        for name, formula_func in self.formulas.items():
-            try:
-                signal = formula_func()
-                performance = self.evaluate_formula(signal.values if hasattr(signal, 'values') else signal, reversals)
-                results.append((name, performance))
-            except Exception as e:
-                print(f"Error evaluating {name}: {str(e)}")
-        
-        # Sort by F1 score
-        results.sort(key=lambda x: x[1]['f1'], reverse=True)
-        return results
+        sorted_features = sorted(
+            self.feature_importance.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return sorted_features[:top_n]
     
-    def build_hybrid_formula(self, top_formulas: List[str]) -> Callable:
+    def generate_formula_string(self, top_n: int = 3) -> str:
         """
-        Combine top formulas into hybrid formula.
+        Generate human-readable formula from top features.
         
         Args:
-            top_formulas: List of best formula names
+            top_n: Number of features to use in formula
         
         Returns:
-            Hybrid formula function
+            Formula string
         """
-        def hybrid(*args, **kwargs):
-            signals = []
-            for formula_name in top_formulas:
-                signal = self.formulas[formula_name]()
-                signals.append(signal.values if hasattr(signal, 'values') else signal)
+        top_features = self.get_top_features(top_n)
+        
+        formula_parts = []
+        for feature, importance in top_features:
+            # Get threshold from reversal candles
+            reversal_mean = self.reversal_features[feature].mean()
+            reversal_std = self.reversal_features[feature].std()
             
-            # Ensemble: signal when 2+ formulas agree
-            combined = np.sum(signals, axis=0) >= 2
-            return combined.astype(float)
+            non_reversal_mean = self.non_reversal_features[feature].mean()
+            
+            # Calculate threshold
+            threshold = (reversal_mean + non_reversal_mean) / 2
+            
+            if reversal_mean > non_reversal_mean:
+                formula_parts.append(f"({feature} > {threshold:.4f})")
+            else:
+                formula_parts.append(f"({feature} < {threshold:.4f})")
         
-        return hybrid
-
-
-def generate_formula_code(formula_dict: Dict, formula_name: str) -> str:
-    """
-    Generate Pine Script code from formula.
+        formula = " AND ".join(formula_parts)
+        return formula
     
-    Args:
-        formula_dict: Formula performance dictionary
-        formula_name: Name of the formula
-    
-    Returns:
-        Pine Script code string
-    """
-    pine_code = f"""
-// Generated Reversal Formula: {formula_name}
-// Performance: F1={formula_dict['f1']:.3f}, Accuracy={formula_dict['accuracy']:.3f}
+    def generate_pine_script(self, top_n: int = 3) -> str:
+        """
+        Generate Pine Script code from discovered formula.
+        
+        Args:
+            top_n: Number of features to use
+        
+        Returns:
+            Pine Script code
+        """
+        top_features = self.get_top_features(top_n)
+        
+        pine_code = """// Auto-generated Reversal Detection Formula
+// Based on analysis of actual reversal points
 
-@indicator("Reversal Signal - {formula_name}", overlay=false)
+@indicator("Reversal Formula", overlay=false)
 
-rsiBuy = ta.rsi(close, 14) < 30
-rsiSell = ta.rsi(close, 14) > 70
-volume_high = volume > ta.sma(volume, 20) * 1.1
-
-macdLine = ta.ema(close, 12) - ta.ema(close, 26)
-macdSignal = ta.ema(macdLine, 9)
-macReversal = (macdLine > macdSignal) and (macdLine[1] <= macdSignal[1])
-
+// Extract features
 bodyRatio = (close - open) / (high - low + 0.001)
-upperWick = (high - math.max(open, close)) / (high - low + 0.001)
-lowerWick = (math.min(open, close) - low) / (high - low + 0.001)
+upperWickRatio = (high - math.max(open, close)) / (high - low + 0.001)
+lowerWickRatio = (math.min(open, close) - low) / (high - low + 0.001)
+closePosition = (close - low) / (high - low + 0.001)
+bodySize = math.abs(close - open) / open
+totalRange = (high - low) / open
 
-reversalSignal = (rsiBuy or rsiSell) and volume_high and macReversal
+"""
+        
+        conditions = []
+        for feature, importance in top_features:
+            reversal_mean = self.reversal_features[feature].mean()
+            non_reversal_mean = self.non_reversal_features[feature].mean()
+            threshold = (reversal_mean + non_reversal_mean) / 2
+            
+            if feature == 'body_ratio':
+                if reversal_mean > non_reversal_mean:
+                    conditions.append(f"bodyRatio > {threshold:.4f}")
+                else:
+                    conditions.append(f"bodyRatio < {threshold:.4f}")
+            
+            elif feature == 'upper_wick_ratio':
+                if reversal_mean > non_reversal_mean:
+                    conditions.append(f"upperWickRatio > {threshold:.4f}")
+                else:
+                    conditions.append(f"upperWickRatio < {threshold:.4f}")
+            
+            # Add more feature mappings as needed
+        
+        condition_string = " and ".join(conditions) if conditions else "true"
+        
+        pine_code += f"""
+// Reversal detection logic
+reversalSignal = {condition_string}
 
 plot(reversalSignal ? 1 : 0, title="Reversal Signal", color=reversalSignal ? color.green : color.red)
 """
-    return pine_code
+        
+        return pine_code
+
+
+def create_example_reversal_file():
+    """
+    Create example JSON file showing how to mark reversals.
+    """
+    example = {
+        "instructions": "List the indices (row numbers) of candles you identified as reversal points",
+        "reversal_indices": [45, 89, 134, 178, 223, 267, 312, 356],
+        "notes": "You can get indices by looking at candle numbers in TradingView or Excel"
+    }
+    
+    with open('reversal_marks_example.json', 'w') as f:
+        json.dump(example, f, indent=2)
+    
+    print("Created reversal_marks_example.json")
 
 
 def main():
-    """CLI interface for formula generation."""
+    """CLI interface."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Generate optimal reversal prediction formula')
+    parser = argparse.ArgumentParser(
+        description='Reverse-engineer reversal formula from actual reversal points'
+    )
     parser.add_argument('--symbol', type=str, default='BTCUSDT', help='Trading pair')
-    parser.add_argument('--lookback', type=int, default=500, help='Number of candles to analyze')
-    parser.add_argument('--lookforward', type=int, default=5, help='Candles ahead to check for reversal')
+    parser.add_argument('--lookback', type=int, default=500, help='Number of candles')
+    parser.add_argument('--reversals', type=str, help='JSON file with marked reversal indices')
+    parser.add_argument('--create-example', action='store_true', help='Create example reversal marks file')
+    parser.add_argument('--output', type=str, help='Save formula to file')
     
     args = parser.parse_args()
     
-    print(f"\nGenerating reversal formulas for {args.symbol}...")
-    print(f"Analyzing {args.lookback} candles, checking {args.lookforward} ahead\n")
+    if args.create_example:
+        create_example_reversal_file()
+        return
     
-    # Load data (demo for now)
-    from huggingface_hub import hf_hub_download
-    
-    REPO_ID = "zongowo111/v2-crypto-ohlcv-data"
-    base = args.symbol.replace("USDT", "")
-    path_in_repo = f"klines/{args.symbol}/{base}_15m.parquet"
-    
+    # Load data
+    print(f"Loading {args.symbol} data...")
     try:
+        from huggingface_hub import hf_hub_download
+        import pyarrow.parquet as pq
+        
+        REPO_ID = "zongowo111/v2-crypto-ohlcv-data"
+        base = args.symbol.replace("USDT", "")
+        path_in_repo = f"klines/{args.symbol}/{base}_15m.parquet"
+        
         local_path = hf_hub_download(
             repo_id=REPO_ID,
             filename=path_in_repo,
             repo_type="dataset"
         )
         df = pd.read_parquet(local_path)
-        
-        # Standardize columns
-        df.columns = df.columns.str.lower()
+        df.columns = [col.lower() for col in df.columns]
         df = df[['open', 'high', 'low', 'close', 'volume']].copy()
         df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
         df = df.tail(args.lookback).reset_index(drop=True)
         
-        print(f"Loaded {len(df)} candles from HuggingFace\n")
-    except:
-        print("Failed to load from HuggingFace. Using demo data.")
-        np.random.seed(42)
-        df = pd.DataFrame({
-            'Open': np.random.normal(100, 5, args.lookback),
-            'High': np.random.normal(102, 5, args.lookback),
-            'Low': np.random.normal(98, 5, args.lookback),
-            'Close': np.random.normal(100, 5, args.lookback),
-            'Volume': np.random.normal(1000, 200, args.lookback).astype(int)
-        })
+        print(f"Loaded {len(df)} candles\n")
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return
     
-    # Detect reversals
-    detector = ReversalDetector()
-    reversals = detector.identify_reversals(df, lookforward=args.lookforward)
+    # Load reversal marks or use example
+    if args.reversals:
+        print(f"Loading reversal marks from {args.reversals}...")
+        labeler = ReversalDataLabeler(df)
+        labeler.load_reversals_from_json(args.reversals)
+    else:
+        print("No reversal marks provided. Use --reversals <file.json>")
+        print("\nTo create your reversal marks:")
+        print("1. Run: python reversal_formula_generator.py --create-example")
+        print("2. Edit reversal_marks_example.json with your reversal indices")
+        print("3. Run: python reversal_formula_generator.py --reversals reversal_marks_example.json")
+        return
     
-    print(f"Reversals detected: {int(np.sum(reversals != 0))} ({100*np.sum(reversals != 0)/len(reversals):.1f}%)\n")
+    reversal_count = np.sum(labeler.reversals)
+    print(f"Found {reversal_count} reversal points\n")
     
-    # Build and optimize formulas
-    builder = FormulaBuilder(df)
-    builder.build_simple_formulas()
-    results = builder.optimize_formulas(reversals)
+    if reversal_count < 3:
+        print("Error: Need at least 3 reversal points to discover formula")
+        return
     
-    print("Formula Performance Rankings:")
-    print("=" * 70)
+    # Extract features
+    print("Extracting features from reversal candles...")
+    reversal_candles = labeler.get_reversal_candles()
+    non_reversal_candles = labeler.get_non_reversal_candles()
     
-    for rank, (name, metrics) in enumerate(results, 1):
-        print(f"\n{rank}. {name.upper()}")
-        print(f"   F1 Score:  {metrics['f1']:.4f}")
-        print(f"   Accuracy:  {metrics['accuracy']:.4f}")
-        print(f"   Precision: {metrics['precision']:.4f}")
-        print(f"   Recall:    {metrics['recall']:.4f}")
-        print(f"   Signals:   {int(metrics['signal_count'])} ({100*metrics['signal_count']/len(df):.1f}%)")
+    reversal_features = ReversalFeatureExtractor.extract_batch_features(reversal_candles)
+    non_reversal_features = ReversalFeatureExtractor.extract_batch_features(non_reversal_candles)
     
-    print("\n" + "=" * 70)
-    print(f"\nTop 3 formulas combination:")
-    top_3_names = [name for name, _ in results[:3]]
-    print(f"Using: {', '.join(top_3_names)}")
+    print(f"Reversal candles: {len(reversal_features)}")
+    print(f"Non-reversal candles: {len(non_reversal_features)}\n")
+    
+    # Discover formula
+    print("Training model to discover formula...\n")
+    discovery = ReversalFormulaDiscovery(reversal_features, non_reversal_features)
+    metrics = discovery.train_model()
+    
+    print(f"Model Accuracy:")
+    print(f"  Train: {metrics['train_accuracy']:.4f}")
+    print(f"  Test:  {metrics['test_accuracy']:.4f}\n")
+    
+    # Show top features
+    print("Top 5 Most Important Reversal Features:")
+    print("=" * 60)
+    for i, (feature, importance) in enumerate(discovery.get_top_features(5), 1):
+        reversal_mean = reversal_features[feature].mean()
+        non_reversal_mean = non_reversal_features[feature].mean()
+        print(f"\n{i}. {feature} (importance: {importance:.4f})")
+        print(f"   Reversal candles avg: {reversal_mean:.4f}")
+        print(f"   Normal candles avg:   {non_reversal_mean:.4f}")
+    
+    # Generate formula
+    print("\n" + "=" * 60)
+    print("\nDiscovered Reversal Formula:")
+    print("=" * 60)
+    formula = discovery.generate_formula_string(top_n=3)
+    print(f"\n{formula}\n")
     
     # Generate Pine Script
-    best_name, best_metrics = results[0]
-    pine_code = generate_formula_code(best_metrics, best_name)
-    
-    print("\n" + "=" * 70)
-    print("Generated Pine Script (Top Formula):\n")
+    print("\nGenerated Pine Script:")
+    print("=" * 60)
+    pine_code = discovery.generate_pine_script(top_n=3)
     print(pine_code)
     
-    print("\n" + "=" * 70)
-    print("\nRecommendation:")
-    print(f"Use: {best_name.upper()}")
-    print(f"Performance: F1={best_metrics['f1']:.4f}, Accuracy={best_metrics['accuracy']:.4f}")
-    print(f"This formula will trigger on {best_metrics['signal_count']:.0f} occasions")
+    # Save if requested
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(pine_code)
+        print(f"\nPine Script saved to: {args.output}")
 
 
 if __name__ == "__main__":
