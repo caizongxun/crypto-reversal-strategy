@@ -1,0 +1,74 @@
+{
+  "strategy_name": "Crypto Reversal Strategy v1.0",
+  "timeframe": "15m",
+  "description": "Default trading configuration for 15-minute cryptocurrency trading",
+  
+  "indicators": {
+    "rsi": {
+      "enabled": true,
+      "length": 14,
+      "overbought": 70,
+      "oversold": 30
+    },
+    "macd": {
+      "enabled": true,
+      "fast": 12,
+      "slow": 26,
+      "signal": 9
+    },
+    "bollinger_bands": {
+      "enabled": true,
+      "period": 20,
+      "stddev": 2.0,
+      "squeeze_threshold": 0.3
+    },
+    "ema": {
+      "enabled": true,
+      "short": 9,
+      "long": 21,
+      "trend_ema": 50
+    }
+  },
+  
+  "features": {
+    "combo_features": true,
+    "volume_profile": true,
+    "trend_filter": true,
+    "divergence_detection": true,
+    "multi_timeframe_confirmation": false
+  },
+  
+  "entry_conditions": {
+    "require_bb_squeeze": true,
+    "require_macd_crossover": true,
+    "require_rsi_extreme": true,
+    "require_volume_filter": true,
+    "require_trend_alignment": true,
+    "min_conditions_met": 3
+  },
+  
+  "risk_management": {
+    "position_size_percent": 2.0,
+    "stop_loss_percent": 1.5,
+    "take_profit_percent": 3.0,
+    "risk_reward_ratio": 1.5,
+    "trailing_stop_enabled": true,
+    "trailing_atr_multiplier": 1.5
+  },
+  
+  "trading_rules": {
+    "max_daily_trades": 20,
+    "max_concurrent_positions": 1,
+    "min_trade_interval_minutes": 15,
+    "daily_loss_limit_percent": 5.0,
+    "avoid_news_events": true
+  },
+  
+  "backtest_settings": {
+    "initial_capital": 10000,
+    "commission_percent": 0.1,
+    "slippage_percent": 0.05,
+    "starting_date": "2024-01-01",
+    "ending_date": "2024-12-31"
+  }
+}
