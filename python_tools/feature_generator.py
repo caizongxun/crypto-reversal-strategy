@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """
 Feature Generator - Automated OHLCV feature discovery
 
@@ -7,14 +8,125 @@ This tool generates new features from historical OHLCV data using:
 - Temporal feature engineering
 - K-line pattern quantification
 - Volume profile extraction
+
+Supports data loading from:
+- Local CSV files
+- HuggingFace datasets (zongowo111/v2-crypto-ohlcv-data)
 """
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import argparse
 import warnings
 warnings.filterwarnings('ignore')
+
+try:
+    from huggingface_hub import hf_hub_download
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+
+
+class HuggingFaceDataLoader:
+    """Load OHLCV data from HuggingFace datasets."""
+    
+    REPO_ID = "zongowo111/v2-crypto-ohlcv-data"
+    HF_ROOT = "klines"
+    
+    SUPPORTED_SYMBOLS = [
+        'AAVEUSDT', 'ADAUSDT', 'ALGOUSDT', 'ARBUSDT', 'ATOMUSDT', 'AVAXUSDT',
+        'BALUSDT', 'BATUSDT', 'BCHUSDT', 'BNBUSDT', 'BTCUSDT', 'COMPUSDT',
+        'CRVUSDT', 'DOGEUSDT', 'DOTUSDT', 'ENJUSDT', 'ENSUSDT', 'ETCUSDT',
+        'ETHUSDT', 'FILUSDT', 'GALAUSDT', 'GRTUSDT', 'IMXUSDT', 'KAVAUSDT',
+        'LINKUSDT', 'LTCUSDT', 'MANAUSDT', 'MATICUSDT', 'MKRUSDT', 'NEARUSDT',
+        'OPUSDT', 'SANDUSDT', 'SNXUSDT', 'SOLUSDT', 'SPELLUSDT', 'UNIUSDT',
+        'XRPUSDT', 'ZRXUSDT'
+    ]
+    
+    @staticmethod
+    def validate_symbol(symbol: str) -> bool:
+        """Check if symbol is supported."""
+        return symbol.upper() in HuggingFaceDataLoader.SUPPORTED_SYMBOLS
+    
+    @staticmethod
+    def load_klines(symbol: str, timeframe: str = '15m') -> pd.DataFrame:
+        """
+        Load OHLCV data from HuggingFace dataset.
+        
+        Args:
+            symbol: Trading pair (e.g., 'BTCUSDT')
+            timeframe: '15m' or '1h'
+        
+        Returns:
+            DataFrame with columns: open_time, open, high, low, close, volume, etc.
+        
+        Raises:
+            ValueError: If symbol not supported or timeframe invalid
+            ImportError: If huggingface_hub not installed
+        """
+        if not HF_AVAILABLE:
+            raise ImportError(
+                "huggingface_hub not installed. "
+                "Install with: pip install huggingface_hub"
+            )
+        
+        symbol = symbol.upper()
+        if not HuggingFaceDataLoader.validate_symbol(symbol):
+            raise ValueError(
+                f"Symbol {symbol} not supported. "
+                f"Supported: {HuggingFaceDataLoader.SUPPORTED_SYMBOLS}"
+            )
+        
+        if timeframe not in ['15m', '1h']:
+            raise ValueError("Timeframe must be '15m' or '1h'")
+        
+        base = symbol.replace("USDT", "")
+        filename = f"{base}_{timeframe}.parquet"
+        path_in_repo = f"{HuggingFaceDataLoader.HF_ROOT}/{symbol}/{filename}"
+        
+        print(f"Loading {symbol} {timeframe} from HuggingFace...")
+        
+        try:
+            local_path = hf_hub_download(
+                repo_id=HuggingFaceDataLoader.REPO_ID,
+                filename=path_in_repo,
+                repo_type="dataset"
+            )
+            df = pd.read_parquet(local_path)
+            print(f"Successfully loaded {len(df)} candles")
+            return df
+        except Exception as e:
+            raise RuntimeError(f"Failed to load data from HuggingFace: {str(e)}")
+    
+    @staticmethod
+    def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Standardize column names to expected format.
+        
+        HuggingFace data has columns: open_time, open, high, low, close, volume, etc.
+        We rename to: Open, High, Low, Close, Volume (capitalized)
+        """
+        column_mapping = {
+            'open': 'Open',
+            'high': 'High',
+            'low': 'Low',
+            'close': 'Close',
+            'volume': 'Volume',
+            'open_time': 'Timestamp'
+        }
+        
+        df_copy = df.copy()
+        df_copy = df_copy.rename(columns=column_mapping)
+        
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in df_copy.columns for col in required_cols):
+            raise ValueError(
+                f"DataFrame missing required columns. "
+                f"Expected: {required_cols}, Got: {df_copy.columns.tolist()}"
+            )
+        
+        return df_copy[required_cols + ['Timestamp']]
 
 
 class FeatureGenerator:
@@ -199,38 +311,103 @@ class FeatureGenerator:
         return pd.DataFrame(flat_features, index=[0])
 
 
-def load_ohlcv_data(filepath: str) -> pd.DataFrame:
+def load_ohlcv_data(filepath: str) -> Optional[pd.DataFrame]:
     """
     Load OHLCV data from CSV file.
     
     Expected columns: Open, High, Low, Close, Volume
     """
-    df = pd.read_csv(filepath)
-    required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-    
-    if not all(col in df.columns for col in required_cols):
-        print(f"Error: CSV must contain columns: {required_cols}")
+    try:
+        df = pd.read_csv(filepath)
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        
+        if not all(col in df.columns for col in required_cols):
+            print(f"Error: CSV must contain columns: {required_cols}")
+            return None
+        
+        return df[required_cols]
+    except Exception as e:
+        print(f"Error loading CSV: {str(e)}")
         return None
-    
-    return df[required_cols]
 
 
 def main():
     """CLI interface for feature generation."""
     
-    parser = argparse.ArgumentParser(description='Generate OHLCV features')
-    parser.add_argument('--file', type=str, help='Path to OHLCV CSV file')
-    parser.add_argument('--symbol', type=str, default='BTCUSDT', help='Trading pair symbol')
-    parser.add_argument('--lookback', type=int, default=100, help='Lookback period')
-    parser.add_argument('--output', type=str, help='Output file path')
+    parser = argparse.ArgumentParser(
+        description='Generate OHLCV features from local or HuggingFace data'
+    )
+    parser.add_argument(
+        '--file',
+        type=str,
+        help='Path to local OHLCV CSV file'
+    )
+    parser.add_argument(
+        '--symbol',
+        type=str,
+        default='BTCUSDT',
+        help='Trading pair symbol (for HuggingFace loading)'
+    )
+    parser.add_argument(
+        '--timeframe',
+        type=str,
+        default='15m',
+        choices=['15m', '1h'],
+        help='Timeframe for data (15m or 1h)'
+    )
+    parser.add_argument(
+        '--lookback',
+        type=int,
+        default=100,
+        help='Number of recent candles to use'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        help='Output CSV file path for features'
+    )
+    parser.add_argument(
+        '--source',
+        type=str,
+        default='huggingface',
+        choices=['huggingface', 'csv', 'demo'],
+        help='Data source: huggingface, csv file, or demo'
+    )
+    parser.add_argument(
+        '--list-symbols',
+        action='store_true',
+        help='List all supported symbols'
+    )
     
     args = parser.parse_args()
     
-    if args.file:
+    if args.list_symbols:
+        print("Supported symbols in HuggingFace dataset:")
+        for i, sym in enumerate(HuggingFaceDataLoader.SUPPORTED_SYMBOLS, 1):
+            print(f"  {i:2d}. {sym}")
+        return
+    
+    df = None
+    
+    if args.source == 'csv' and args.file:
+        print(f"Loading data from CSV: {args.file}")
         df = load_ohlcv_data(args.file)
-        if df is None:
+        
+    elif args.source == 'huggingface':
+        if not HF_AVAILABLE:
+            print("Error: huggingface_hub not installed")
+            print("Install with: pip install huggingface_hub")
             return
-    else:
+        
+        try:
+            print(f"Loading {args.symbol} {args.timeframe} from HuggingFace...")
+            df = HuggingFaceDataLoader.load_klines(args.symbol, args.timeframe)
+            df = HuggingFaceDataLoader.standardize_columns(df)
+        except Exception as e:
+            print(f"Error loading from HuggingFace: {str(e)}")
+            return
+            
+    elif args.source == 'demo':
         print("Generating sample data for demonstration...")
         np.random.seed(42)
         n = max(args.lookback, 100)
@@ -242,7 +419,11 @@ def main():
             'Volume': np.random.normal(1000, 200, n).astype(int)
         })
     
-    print(f"\nGenerating features for {args.symbol}...")
+    if df is None or df.empty:
+        print("Failed to load data. Please check your input.")
+        return
+    
+    print(f"\nGenerating features for {args.symbol} {args.timeframe}...")
     print(f"Using {len(df)} candles with lookback={args.lookback}")
     
     generator = FeatureGenerator(df, lookback=args.lookback)
@@ -252,7 +433,8 @@ def main():
     print(f"Total feature groups: {len(features)}")
     
     for group_name, group_features in features.items():
-        print(f"  - {group_name}: {len(group_features)} features")
+        if group_name != 'temporal' or 'note' not in group_features:
+            print(f"  - {group_name}: {len(group_features)} features")
     
     feature_df = generator.to_dataframe()
     print(f"\nTotal features generated: {len(feature_df.columns)}")
@@ -261,7 +443,7 @@ def main():
         feature_df.to_csv(args.output, index=False)
         print(f"Features saved to: {args.output}")
     else:
-        print("\nTop 10 features:")
+        print("\nSample features (first 10 columns):")
         print(feature_df.iloc[:, :10])
 
 
